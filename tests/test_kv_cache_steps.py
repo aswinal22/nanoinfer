@@ -73,10 +73,13 @@ def test_rung1_length_starts_at_zero():
 
 
 def test_rung2_length_tracks_appends():
+    """Appends accumulate -- each call extends the history rather than replacing."""
     c = KVCache.from_config(TINY, batch=B)
+    total = 0
     for n in (1, 3, 6):
         c.append(0, rand_kv(n), rand_kv(n))
-        assert c.get_seq_len() == n, f"after appending {n}"
+        total += n
+        assert c.get_seq_len() == total, f"after appending {n}"
         assert c.is_empty() is False
 
 
@@ -162,14 +165,51 @@ def test_rung4_append_of_single_token():
         assert vf.shape[-2] == i + 1
 
 
-def test_rung4_pointer_is_shared_across_layers():
-    """One counter for all layers -- that is what keeps them aligned."""
+def test_rung4_each_layer_keeps_its_own_cursor():
+    """Layers advance independently; all cursors stay equal in practice.
+
+    Every layer is handed the same tokens in the same order, so after a full
+    pass they agree -- which is what makes a single `get_seq_len()` correct.
+    """
     c = KVCache.from_config(TINY, batch=B)
-    c.append(0, rand_kv(4), rand_kv(4))
-    c.append(1, rand_kv(4), rand_kv(4))
-    assert c.get_seq_len() == 4, "layers must share one counter"
-    assert c.get_kv(0)[0].shape[-2] == 4
-    assert c.get_kv(1)[0].shape[-2] == 4
+    for layer in range(TINY.n_layers):
+        c.append(layer, rand_kv(4), rand_kv(4))
+
+    assert c.get_seq_len() == 4
+    for layer in range(TINY.n_layers):
+        assert c.get_kv(layer)[0].shape[-2] == 4, f"layer {layer}"
+
+
+def test_rung4_prefill_does_not_double_count_length():
+    """REGRESSION TEST. Prefilling S tokens through every layer leaves length S.
+
+    This is the bug a single shared counter causes: layer 0 advances the shared
+    counter to S, layer 1 then writes at offset S and advances it to 2S. The
+    prompt length would silently double every layer.
+
+    Asserted explicitly because it is invisible without this test.
+    """
+    c = KVCache.from_config(TINY, batch=B)
+    for layer in range(TINY.n_layers):
+        c.append(layer, rand_kv(3), rand_kv(3))
+    assert c.get_seq_len() == 3, (
+        f"length is {c.get_seq_len()} after prefilling 3 tokens; "
+        f"a shared cursor advanced per layer would give {3 * TINY.n_layers}"
+    )
+
+
+def test_rung4_decode_appends_to_every_layer_at_the_same_offset():
+    """After a prefill, each layer's next token lands at the SAME index."""
+    c = KVCache.from_config(TINY, batch=B)
+    for layer in range(TINY.n_layers):
+        c.append(layer, rand_kv(5), rand_kv(5))
+    assert c.get_seq_len() == 5
+
+    for layer in range(TINY.n_layers):
+        kf, _ = c.append(layer, rand_kv(1), rand_kv(1))
+        assert kf.shape[-2] == 6, f"layer {layer}"
+
+    assert c.get_seq_len() == 6, "the logical length must advance by exactly 1"
 
 
 def test_rung4_raises_on_overflow():

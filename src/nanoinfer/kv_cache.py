@@ -51,7 +51,7 @@ Shapes assume `[batch, n_heads, seq, head_dim]` throughout.
 
         self.k       key buffer
         self.v       value buffer
-        self.cur_len the shared write pointer (an int)
+        self.cur_len write cursor, PER LAYER (see below)
 
 ## Layout to use
 
@@ -62,14 +62,38 @@ Preallocate one contiguous buffer per tensor, with the layer axis FIRST:
 One contiguous tensor per tensor type means `self.k[0]` is a cheap view rather
 than a Python list of separate allocations.
 
-Plus a single write pointer `self.cur_len` shared across layers. `append`
-writes at the pointer and advances it.
-
 Allocating once and reusing the memory is the whole point: per-step allocation
 would reintroduce the overhead you are trying to remove.
 
-Why a single shared pointer? Every layer sees the same tokens, so every layer
-is always at the same length. One counter, not `n_layers` of them.
+## The cursor is PER LAYER, not shared
+
+This is the one design decision worth getting right, and it is easy to get
+wrong. Consider a single shared counter advanced inside `append`, prefilling
+S=3 tokens through a 2-layer model:
+
+    layer 0: reads counter=0, writes [0:3], counter -> 3
+    layer 1: reads counter=3, writes [3:6], counter -> 6   <-- WRONG
+
+Layer 1 writes at offset 3 instead of 0, so its keys and values no longer line
+up with layer 0's, and the length is now 6 for a 3-token prompt.
+
+The same bug hits single-token decode:
+
+    counter starts at 5
+    layer 0: writes [5], counter -> 6
+    layer 1: writes [6], counter -> 7   <-- the new token is index 5, not 6
+
+**Each layer therefore needs its own cursor.** Every layer appends the same
+tokens in the same order, so all cursors stay equal -- which is what lets
+`get_seq_len()` read a single one and still be correct.
+
+    self.cur_len = [0] * n_layers
+
+    append(layer_idx, ...):   start = self.cur_len[layer_idx]
+                              write at [start : start + n_new]
+                              self.cur_len[layer_idx] = start + n_new
+
+    get_seq_len():            return self.cur_len[0]
 
 ## Work in order
 
@@ -153,7 +177,16 @@ class KVCache:
 
         # TODO(you): initialise the write pointer.
         #
-        #   self.cur_len = 0
+        #   self.cur_len = [0] * n_layers      <-- ONE PER LAYER
+        #
+        # Read "The cursor is PER LAYER, not shared" above before choosing
+        # between this and a single scalar. The scalar version is broken and
+        # will cost you an afternoon.
+
+        shape = (n_layers, batch, n_kv_heads, max_seq_len, head_dim)
+        self.k = torch.empty(shape, dtype=dtype, device=device)
+        self.v = torch.empty(shape, dtype=dtype, device=device)
+        self.cur_len = 0
 
     @classmethod
     def from_config(
@@ -179,17 +212,24 @@ class KVCache:
     def is_empty(self) -> bool:
         """True before the first append."""
         # TODO(you)
-        raise NotImplementedError("M2 task")
+        if(self.cur_len == 0):
+            return True
+        else:
+            return False
 
     def get_seq_len(self) -> int:
-        """Number of tokens currently cached. Same for every layer."""
+        """Number of tokens currently cached.
+
+        Every layer appends the same tokens in the same order, so all cursors
+        stay equal. Reading layer 0's is therefore correct.
+        """
         # TODO(you)
         raise NotImplementedError("M2 task")
 
     def reset(self) -> None:
         """Drop all history so the cache can serve a new sequence."""
-        # TODO(you): set the pointer back to 0. You do not need to zero the
-        # buffers -- nothing may read past the pointer.
+        # TODO(you): rewind EVERY layer's cursor to 0. You do not need to zero
+        # the buffers -- nothing may read past a cursor.
         raise NotImplementedError("M2 task")
 
     # --- data --------------------------------------------------------------
@@ -201,7 +241,7 @@ class KVCache:
             (k, v), each [batch, n_kv_heads, cur_len, head_dim]
         """
         # TODO(you): slice to the live length only.
-        raise NotImplementedError("M2 task")
+        return (self.k[layer_idx], self.v[layer_idx])
 
     def append(
         self, layer_idx: int, k_new: Tensor, v_new: Tensor
@@ -226,14 +266,31 @@ class KVCache:
         #
         # Note the pointer is shared across layers, so layer 0 advancing it in
         # prefill is what makes layer 1's slice start at the right place.
-        raise NotImplementedError("M2 task")
+        cur = self.cur_len
+        no_new_tokens = k_new.shape[2]
+
+        if cur + no_new_tokens > self.max_seq_len:
+            raise ValueError(
+            f"KV cache overflow: {cur + no_new_tokens} tokens requested, "
+            f"but capacity is {self.max_seq_len}")
+
+        self.k[layer_idx,:,:,cur:cur+no_new_tokens,:] = k_new
+        self.v[layer_idx,:,:,cur:cur+no_new_tokens,:] = v_new
+
+        self.cur_len += no_new_tokens
+        return (
+        self.k[layer_idx, :, :, :self.cur_len, :],
+        self.v[layer_idx, :, :, :self.cur_len, :],
+    )
 
     # --- diagnostics -------------------------------------------------------
 
     def bytes_allocated(self) -> int:
         """Bytes held by the buffers, including unused capacity."""
-        # TODO(you), or leave as: sum of numel * element_size over self.k, self.v
-        raise NotImplementedError("M2 task")
+        return (
+        self.k.numel() * self.k.element_size()
+        + self.v.numel() * self.v.element_size()
+    )
 
     def __repr__(self) -> str:
         try:

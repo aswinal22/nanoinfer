@@ -35,9 +35,22 @@ torch.zeros(...)   # or torch.empty(...) -- see below
 Which axes does each argument correspond to? `dtype=` and `device=` are keyword
 arguments, not positional.
 
-**The counter:** one plain integer attribute starting at 0. One counter, *not*
-one per layer — every layer consumes the same tokens, so they are always the
-same length.
+**The cursor:** **one per layer** — a plain Python list of `n_layers` zeros.
+
+**Why not one shared counter?** It looks cleaner, and it is broken. Prefilling
+S=3 tokens through a 2-layer model with a shared counter:
+
+```
+layer 0: reads counter=0, writes [0:3], counter -> 3
+layer 1: reads counter=3, writes [3:6], counter -> 6   <-- WRONG
+```
+
+Layer 1 writes at offset 3 instead of 0, so its keys and values no longer line
+up with layer 0's, and the length ends at 6 for a 3-token prompt. Single-token
+decode breaks the same way. Every layer therefore needs its own cursor.
+
+They stay equal in practice — every layer gets the same tokens in the same
+order — which is what lets `get_seq_len()` read just layer 0's and be correct.
 
 **`zeros` vs `empty`:** `zeros` is safer and the difference is irrelevant at this
 size. Use `zeros`. Do not worry about it again.
@@ -51,17 +64,17 @@ size. Use `zeros`. Do not worry about it again.
 **Goal:** three trivial methods, all reading or writing that one counter.
 
 ```
-is_empty()    -> is the counter zero?
-get_seq_len() -> what is the counter?
-reset()       -> set the counter back to zero
+is_empty()    -> is every cursor zero?
+get_seq_len() -> the sequence length (read layer 0's cursor)
+reset()       -> set every cursor back to zero
 ```
 
 **The one decision:** does `reset()` reallocate the tensors?
 
 It should **not**. Reallocating would defeat the entire point — the whole reason
 for a preallocated cache is that step *N* reuses the memory step *N-1* used.
-Just rewind the counter. Stale values past the counter are harmless *because
-nothing is ever allowed to read past the counter* — which is rung 3's job.
+Just rewind the cursors. Stale values past a cursor are harmless *because
+nothing is ever allowed to read past it* — which is rung 3's job.
 
 **Verify:** `rung2` — append 3, check length is 3, reset, check it's 0.
 
@@ -82,7 +95,11 @@ return (k, v)
 want to hand back `[batch, n_kv_heads, cur_len, head_dim]`.
 
 So: drop the first axis by indexing it with `layer_idx`, then **slice the
-sequence axis to the counter**, leaving the other two axes alone.
+sequence axis to that layer's cursor**, leaving the other two axes alone.
+
+Note: to this layer's cursor, not a global one. With per-layer cursors you can
+index the layer axis once and then slice with the cursor you read from that
+same layer.
 
 **This is trap #1 and it is the one that bites hardest.** If you return the
 whole `[..., max_seq_len, ...]` slab, attention will read 512 positions of
@@ -109,24 +126,23 @@ Never hardcode 1.
 
 ```
 1. would this overflow max_seq_len?  -> raise a clear error
-2. write k_new / v_new into the slot starting at the current counter
-3. advance the counter by n_new
+2. write k_new / v_new into the slot starting at THIS LAYER's cursor
+3. advance THIS LAYER's cursor by n_new
 4. return the live slice (rung 3 again)
 ```
 
 **Step 2 is a slice *assignment*, not a function call.** You are writing into
 an existing tensor. Think `x[...] = value` where `...` is your slot. The
-destination slot spans `[counter : counter + n_new]` on the sequence axis.
+destination slot spans `[cursor : cursor + n_new]` on the sequence axis.
 
-**Watch for:** getting the destination and the counter inconsistent — writing at
+**Watch for:** getting the destination and the cursor inconsistent — writing at
 the right place but advancing by the wrong amount, or vice versa. Either
 corrupts the cache silently.
 
-**Why is the counter shared across layers?** In prefill, layer 0 appends the
-prompt and advances the counter; layer 1 then appends *at the same position*
-because it reads the same counter. That's what keeps layers aligned. If you had
-a per-layer counter this would still work, but a shared one makes "what is the
-current sequence length?" a question with one answer instead of *n_layers*.
+**The per-layer cursor is what keeps layers aligned.** In prefill, layer 0
+writes its K/V at `[0:S]` and layer 1 writes *its* K/V at `[0:S]` too, because
+it reads its own cursor rather than layer 0's. A shared counter would push
+layer 1 to `[S:2S]`.
 
 **Verify:** `rung4` — append 3 then append 1, and check **both** that the length
 is 4 *and* that the first 3 tokens are unchanged. That second assertion is the
@@ -189,20 +205,23 @@ for layer in self.layers:
     x = layer.forward_cached(x, c, s, cache, layer.layer_idx)
 ```
 
-**Why it must be once:** the counter is shared, and `append` advances it. So if
-you recomputed the offset inside the loop:
+**Why it must be once:** `append` advances the layer's cursor. So if you
+recomputed the offset inside the loop by reading layer 0's cursor:
 
 ```
-layer 0 reads offset = 5, appends, counter becomes 6
-layer 1 reads offset = 6   <-- WRONG, layer 1's token is also at position 5
-layer 2 reads offset = 7   <-- WRONG
+layer 0 reads offset 5, appends -> its cursor becomes 6
+layer 1 reads offset 5, appends -> its cursor becomes 6     (fine so far)
 ```
 
-Every layer would place the same token at a different position. The output is
-garbage, there's no error, and the cause is three lines away from the symptom.
+…that happens to be harmless *only* because each layer has its own cursor. But
+if you write `cache.get_seq_len()` while inside the loop **and** the cursors
+ever diverge — or if you use a single shared counter — every layer places the
+same token at a different position. Output is garbage, no exception is raised,
+and the cause is three lines from the symptom.
 
-That is exactly why `forward_cached` takes `cos`/`sin` as **parameters** — it's
-designed so the offset is decided once by the caller.
+Compute the offset once at the top regardless. It is clearer, and it makes the
+invariant explicit. That is exactly why `forward_cached` takes `cos`/`sin` as
+**parameters** — the offset is decided once, by the caller.
 
 **Also:** `rope_slice(cos, sin, offset, length)` — `length` is how many tokens
 you're feeding in, which is 1 for decode and the prompt length for prefill.
