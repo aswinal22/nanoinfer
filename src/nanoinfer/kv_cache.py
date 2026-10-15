@@ -44,20 +44,39 @@ Shapes assume `[batch, n_heads, seq, head_dim]` throughout.
     is_empty()       -> bool
         True before the first append.
 
+## Names to use
+
+    Tests in `tests/test_kv_cache_steps.py` reach into attributes directly, so
+    use these exact names:
+
+        self.k       key buffer
+        self.v       value buffer
+        self.cur_len the shared write pointer (an int)
+
 ## Layout to use
 
-Preallocate one contiguous buffer per layer:
+Preallocate one contiguous buffer per tensor, with the layer axis FIRST:
 
     [n_layers, batch, n_kv_heads, max_seq_len, head_dim]
 
-plus a single write pointer shared across layers. `append` writes at the
-pointer and advances it.
+One contiguous tensor per tensor type means `self.k[0]` is a cheap view rather
+than a Python list of separate allocations.
+
+Plus a single write pointer `self.cur_len` shared across layers. `append`
+writes at the pointer and advances it.
 
 Allocating once and reusing the memory is the whole point: per-step allocation
 would reintroduce the overhead you are trying to remove.
 
 Why a single shared pointer? Every layer sees the same tokens, so every layer
 is always at the same length. One counter, not `n_layers` of them.
+
+## Work in order
+
+Rungs 1-4 (this file) are pure bookkeeping and contain no new ideas. Rungs 5-6
+are in transformer.py and are where the actual lesson lives.
+
+`docs/m2_stairs.md` walks through all six with hints and one test per rung.
 
 ## Gotchas, in the order people hit them
 
@@ -126,13 +145,15 @@ class KVCache:
 
         # TODO(you): allocate the K and V buffers.
         #
-        # Suggested shape: [n_layers, batch, n_kv_heads, max_seq_len, head_dim]
-        # Suggested names: self.k, self.v
+        #   self.k, self.v
+        #   shape: [n_layers, batch, n_kv_heads, max_seq_len, head_dim]
         #
         # torch.zeros(...) is fine. torch.empty(...) is faster and also
         # correct, provided you never read beyond `cur_len` -- see gotcha #1.
 
-        # TODO(you): initialise the write pointer to 0.
+        # TODO(you): initialise the write pointer.
+        #
+        #   self.cur_len = 0
 
     @classmethod
     def from_config(
