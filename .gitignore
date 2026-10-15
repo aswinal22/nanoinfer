@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# experiment artifacts
+experiments/out/
+*.png
+!docs/**/*.png
+results/
+*.csv
+!experiments/**/*.csv
+
+# model weights / caches
+*.safetensors
+*.bin
+*.pt
+*.pth
+hf_cache/
+.cache/
