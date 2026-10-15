@@ -111,17 +111,35 @@ class TransformerConfig:
         return 0 if self.tie_embeddings else self.vocab_size * self.d_model
 
     @property
+    def params_norm_per_layer(self) -> int:
+        """RMSNorm gains: one for attention, one for the FFN."""
+        return 2 * self.d_model
+
+    @property
+    def params_norm_final(self) -> int:
+        """The final norm before the LM head."""
+        return self.d_model
+
+    @property
     def n_params(self) -> int:
-        """Total parameters, including embeddings and the LM head."""
-        return self.params_blocks + self.params_embedding + self.params_lm_head
+        """Total parameters, including embeddings, norms, and the LM head."""
+        return (
+            self.params_blocks
+            + self.params_embedding
+            + self.params_lm_head
+            + self.n_layers * self.params_norm_per_layer
+            + self.params_norm_final
+        )
 
     @property
     def n_params_matmul(self) -> int:
         """Parameters touched by a GEMM per token.
 
         Embeddings are gathers, not matmuls; the LM head is usually computed only
-        for the final position during decode. This is the denominator that matters
-        for the "decode is memory-bound" argument.
+        for the final position during decode; RMSNorm gains are elementwise.
+        This is the denominator that matters for the "decode is memory-bound"
+        argument. Excluding the norms costs 0.003% on Llama-3-8B, which is well
+        below the precision of the model itself.
         """
         return self.params_blocks + self.params_lm_head
 
