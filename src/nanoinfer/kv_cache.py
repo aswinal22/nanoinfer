@@ -144,7 +144,7 @@ class KVCache:
     """Fixed-capacity preallocated key/value cache.
 
     Storage layout per layer: [batch, n_kv_heads, max_seq_len, head_dim].
-    One write pointer is shared by all layers.
+    Each layer has its own write pointer.
 
     This is the naive-but-correct design. It wastes the tail of `max_seq_len`
     for short sequences -- which is exactly the problem M3 (paged attention)
@@ -186,7 +186,7 @@ class KVCache:
         shape = (n_layers, batch, n_kv_heads, max_seq_len, head_dim)
         self.k = torch.empty(shape, dtype=dtype, device=device)
         self.v = torch.empty(shape, dtype=dtype, device=device)
-        self.cur_len = 0
+        self.cur_len = [0] * n_layers
 
     @classmethod
     def from_config(
@@ -212,10 +212,7 @@ class KVCache:
     def is_empty(self) -> bool:
         """True before the first append."""
         # TODO(you)
-        if(self.cur_len == 0):
-            return True
-        else:
-            return False
+        return self.cur_len[0] == 0
 
     def get_seq_len(self) -> int:
         """Number of tokens currently cached.
@@ -223,14 +220,11 @@ class KVCache:
         Every layer appends the same tokens in the same order, so all cursors
         stay equal. Reading layer 0's is therefore correct.
         """
-        # TODO(you)
-        raise NotImplementedError("M2 task")
+        return self.cur_len[0]
 
     def reset(self) -> None:
         """Drop all history so the cache can serve a new sequence."""
-        # TODO(you): rewind EVERY layer's cursor to 0. You do not need to zero
-        # the buffers -- nothing may read past a cursor.
-        raise NotImplementedError("M2 task")
+        self.cur_len = [0] * self.n_layers
 
     # --- data --------------------------------------------------------------
 
@@ -240,8 +234,11 @@ class KVCache:
         Returns:
             (k, v), each [batch, n_kv_heads, cur_len, head_dim]
         """
-        # TODO(you): slice to the live length only.
-        return (self.k[layer_idx], self.v[layer_idx])
+        cur = self.cur_len[layer_idx]
+        return (
+            self.k[layer_idx, :, :, :cur, :],
+            self.v[layer_idx, :, :, :cur, :],
+        )
 
     def append(
         self, layer_idx: int, k_new: Tensor, v_new: Tensor
@@ -263,10 +260,7 @@ class KVCache:
         #   2. write k_new/v_new at [:, :, cur:cur+n_new, :]
         #   3. advance the pointer by n_new
         #   4. return the live slice
-        #
-        # Note the pointer is shared across layers, so layer 0 advancing it in
-        # prefill is what makes layer 1's slice start at the right place.
-        cur = self.cur_len
+        cur = self.cur_len[layer_idx]
         no_new_tokens = k_new.shape[2]
 
         if cur + no_new_tokens > self.max_seq_len:
@@ -274,14 +268,14 @@ class KVCache:
             f"KV cache overflow: {cur + no_new_tokens} tokens requested, "
             f"but capacity is {self.max_seq_len}")
 
-        self.k[layer_idx,:,:,cur:cur+no_new_tokens,:] = k_new
-        self.v[layer_idx,:,:,cur:cur+no_new_tokens,:] = v_new
+        self.k[layer_idx, :, :, cur : cur + no_new_tokens, :] = k_new
+        self.v[layer_idx, :, :, cur : cur + no_new_tokens, :] = v_new
 
-        self.cur_len += no_new_tokens
+        self.cur_len[layer_idx] = cur + no_new_tokens
         return (
-        self.k[layer_idx, :, :, :self.cur_len, :],
-        self.v[layer_idx, :, :, :self.cur_len, :],
-    )
+            self.k[layer_idx, :, :, : self.cur_len[layer_idx], :],
+            self.v[layer_idx, :, :, : self.cur_len[layer_idx], :],
+        )
 
     # --- diagnostics -------------------------------------------------------
 
