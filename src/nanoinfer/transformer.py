@@ -136,10 +136,22 @@ class DecoderLayer(nn.Module):
 
         See docs/m2_brief.md and src/nanoinfer/kv_cache.py.
         """
-        raise NotImplementedError(
-            "M2 task: implement cached decoding. "
-            "See src/nanoinfer/kv_cache.py and docs/m2_brief.md"
+        h = self.cfg
+        h_norm = rms_norm(x, self.attn_norm)
+        q, k, v = project_qkv(
+            h_norm,
+            self.w_q,
+            self.w_k,
+            self.w_v,
+            h.n_heads,
+            h.n_kv_heads,
+            cos,
+            sin,
         )
+        k_full, v_full = cache.append(layer_idx, k, v)
+        attn = causal_attention(q, k_full, v_full)
+        x = x + attn_output_proj(attn, self.w_o)
+        return x + self._ffn(rms_norm(x, self.ffn_norm))
 
 
 class NanoTransformer(nn.Module):
@@ -208,9 +220,31 @@ class NanoTransformer(nn.Module):
         Returns:
             [batch, seq, vocab]
         """
-        raise NotImplementedError(
-            "M2 task: implement forward_step. See docs/m2_brief.md"
-        )
+        seq_len = input_ids.shape[-1]
+        start = cache.get_seq_len()
+        if start + seq_len > self.cfg.max_position_embeddings:
+            raise ValueError(
+                f"sequence length {start + seq_len} exceeds context "
+                f"{self.cfg.max_position_embeddings}"
+            )
+
+        x = self.embed(input_ids)
+        outputs = []
+        for token_idx in range(seq_len):
+            h = x[:, token_idx : token_idx + 1]
+            cos, sin = rope_slice(
+                self.rope_cos,
+                self.rope_sin,
+                start + token_idx,
+                1,
+            )
+            for layer_idx, layer in enumerate(self.layers):
+                h = layer.forward_cached(h, cos, sin, cache, layer_idx)
+            outputs.append(h)
+
+        x = torch.cat(outputs, dim=1)
+        x = rms_norm(x, self.final_norm)
+        return torch.nn.functional.linear(x, self.embed.weight)
 
     # --- convenience -------------------------------------------------------
 
