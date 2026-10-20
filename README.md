@@ -67,8 +67,8 @@ See [docs/roadmap.md](docs/roadmap.md) for the full plan with acceptance criteri
 | # | Question | Status |
 |---|---|---|
 | M1 | What are we actually bound by? | **Done** |
-| M2 | Why is a KV cache worth having? | Next |
-| M3 | Why does the KV cache waste memory, and how do we page it? | |
+| M2 | Why is a KV cache worth having? | **Done** |
+| M3 | Why does the KV cache waste memory, and how do we page it? | Next |
 | M4 | How should a server schedule requests? | |
 | M5 | How do we shrink the bytes we must read? | |
 | M6 | How do we generate fewer tokens? | |
@@ -114,6 +114,43 @@ That is a memory problem, not a FLOP problem — which is exactly why paged and
 quantized KV caches help, and why a compute-focused optimization would not.
 
 Both facts are pinned by tests so the misconception cannot creep back in.
+
+---
+
+## Milestone 2 — Why is a KV cache worth having?
+
+Working code, verified bit-exact against naive recomputation. Answers:
+
+- **What does a KV cache actually buy us?** It converts an $O(N^2)$ recomputation
+  cascade into an $O(N)$ linear walk. Each decode step drops from $O(N)$ work to
+  $O(1)$ by storing deterministic past keys and values.
+- **Speedup scales with context length.** At 16 generated tokens, cached decode is
+  **1.30x** faster; by 256 tokens, it reaches **2.91x** speedup on CPU.
+- **Throughput stability.** Cached decode maintains steady throughput (~850–915 tok/s),
+  whereas naive decode collapses from 648 down to 293 tok/s as sequence length grows.
+- **Correctness.** Logits and emitted tokens from cached decode are bitwise identical
+  (`torch.equal`) to naive full recomputation over all lengths tested.
+
+### Results
+
+![KV Cache Speedup](experiments/out/m2_speedup.png)
+
+```
+New Tokens |   Naive Time |  Cached Time |    Speedup |  Naive tok/s |  Cached tok/s | Exact Match
+--------------------------------------------------------------------------------------------
+        16 |     0.0247 s |     0.0190 s |      1.30x |        647.7 |         841.7 | YES (bitwise)
+        32 |     0.0535 s |     0.0367 s |      1.46x |        597.6 |         872.1 | YES (bitwise)
+        64 |     0.1116 s |     0.0698 s |      1.60x |        573.7 |         916.8 | YES (bitwise)
+       128 |     0.3008 s |     0.1434 s |      2.10x |        425.5 |         892.5 | YES (bitwise)
+       256 |     0.8727 s |     0.2998 s |      2.91x |        293.3 |         853.9 | YES (bitwise)
+```
+
+### The trade-off revealed
+
+The KV cache eliminates redundant arithmetic, but at a memory cost:
+`bytes_allocated()` is preallocated to `max_position_embeddings`, meaning short
+sequences waste capacity. This memory fragmentation directly motivates **M3 (Paged Attention)**.
+
 
 ---
 

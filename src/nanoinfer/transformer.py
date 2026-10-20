@@ -282,3 +282,38 @@ class NanoTransformer(nn.Module):
             nxt = logits.argmax(dim=-1, keepdim=True)
             out = torch.cat([out, nxt], dim=1)
         return out
+
+    @torch.no_grad()
+    def generate_cached(
+        self,
+        input_ids: Tensor,
+        max_new_tokens: int = 16,
+        cache: "KVCache" | None = None,
+    ) -> Tensor:
+        """Greedy generation WITH a KV cache -- O(n) total work.
+
+        Returns:
+            [batch, prompt_len + max_new_tokens] including the prompt.
+        """
+        if max_new_tokens <= 0:
+            return input_ids
+
+        b = input_ids.shape[0]
+        if cache is None:
+            from .kv_cache import KVCache
+            cache = KVCache.from_config(
+                self.cfg, batch=b, dtype=torch.float32, device=input_ids.device
+            )
+        else:
+            cache.reset()
+
+        logits = self.forward_step(input_ids, cache)
+        nxt = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        out = torch.cat([input_ids, nxt], dim=1)
+
+        for _ in range(max_new_tokens - 1):
+            logits = self.forward_step(nxt, cache)
+            nxt = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            out = torch.cat([out, nxt], dim=1)
+
+        return out
