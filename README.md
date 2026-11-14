@@ -68,8 +68,8 @@ See [docs/roadmap.md](docs/roadmap.md) for the full plan with acceptance criteri
 |---|---|---|
 | M1 | What are we actually bound by? | **Done** |
 | M2 | Why is a KV cache worth having? | **Done** |
-| M3 | Why does the KV cache waste memory, and how do we page it? | Next |
-| M4 | How should a server schedule requests? | |
+| M3 | Why does the KV cache waste memory, and how do we page it? | **Done** |
+| M4 | How should a server schedule requests? | Next |
 | M5 | How do we shrink the bytes we must read? | |
 | M6 | How do we generate fewer tokens? | |
 | M7 | Validate everything on a real GPU | |
@@ -150,6 +150,42 @@ New Tokens |   Naive Time |  Cached Time |    Speedup |  Naive tok/s |  Cached t
 The KV cache eliminates redundant arithmetic, but at a memory cost:
 `bytes_allocated()` is preallocated to `max_position_embeddings`, meaning short
 sequences waste capacity. This memory fragmentation directly motivates **M3 (Paged Attention)**.
+
+---
+
+## Milestone 3 — Why does the KV cache waste memory, and how do we page it?
+
+Virtual memory paging for the KV cache (`block_table.py`). Answers:
+
+- **Why does a naive allocator waste memory?** Because sequence length cannot be known
+  in advance. Contiguous caches preallocate `max_context` (e.g. 2,048 tokens), which
+  causes **92.3% reservation waste** when real requests average ~150–250 tokens.
+- **Fixed-size blocks eliminate fragmentation.** Allocating memory in small, fixed-size
+  16-token physical blocks on demand drops waste from **92.3% down to 4.5%**, reducing
+  overall cache footprint by **12.46x**.
+- **Massive concurrency gain.** On an 80 GB GPU budget, PagedAttention scales
+  concurrency from **298 users** (contiguous) to **3,699 concurrent users** (a **12.4x gain**).
+- **Copy-on-Write (Prefix Caching).** Shared prompts (system messages, few-shot prompts)
+  reuse identical physical blocks across requests with zero memory duplication.
+
+### Results
+
+![PagedAttention Fragmentation](experiments/out/m3_fragmentation.png)
+
+```
+Simulated Workload: 100 requests (mean length = 157.0 tokens, max = 587 tokens)
+------------------------------------------------------------------------------
+Metric                               |   Contiguous Cache |      Paged Cache
+------------------------------------------------------------------------------
+Total Memory Allocated               |           26.84 GB |          2.15 GB
+Active Useful Memory                 |            2.06 GB |          2.06 GB
+Memory Wasted                        |           24.79 GB |          0.10 GB
+Fragmentation / Waste Rate           |              92.3% |             4.5%
+Memory Footprint Reduction           |    1.0x (baseline) |           12.46x
+------------------------------------------------------------------------------
+Concurrency (80 GB VRAM Budget)      |          298 users |      3,699 users (12.4x)
+```
+
 
 
 ---

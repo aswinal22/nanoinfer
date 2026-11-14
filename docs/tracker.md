@@ -1,10 +1,10 @@
 # 8-Day Inference Engineering Progress Tracker
 
-**Current Status:** Day 1 Completed (Milestones 1 & 2 + FlashAttention) | Day 2 Next (Milestone 3: PagedAttention)  
-**Last Updated:** October 20, 2026
+**Current Status:** Day 7 Completed (MoE & DeepSeek MLA Done) | Day 8 Next (The Interview Masterclass & Capstone)  
+**Last Updated:** November 13, 2026
 
 ```
-Overall Progress: [██░░░░░░░░] 1 / 8 Days (25% of Roadmap Milestones)
+Overall Progress: [███████░░░] 7 / 8 Days (87.5% of Roadmap Milestones)
 ```
 
 ---
@@ -32,50 +32,55 @@ Overall Progress: [██░░░░░░░░] 1 / 8 Days (25% of Roadmap Mi
 
 ---
 
-### [ ] Day 2: PagedAttention (Milestone 3)
-- [ ] **The Problem:** Measuring memory waste (internal & external fragmentation) from contiguous allocation.
-- [ ] **The Solution:** Building a Block Table (logical $\to$ physical mapping) with 16-token pages.
-- [ ] **Copy-on-Write (Forking):** How multiple sequences share identical prefix blocks.
-- [ ] **Measurement:** How many extra concurrent sequences fit per GB using paging.
-- [ ] **Cycle 1 Recall:** 10-minute verbal walkthrough of Roofline, FlashAttention, and Paging.
+### [x] Day 2: PagedAttention (Milestone 3)
+- [x] **The Problem:** Measured contiguous memory waste (92.3% waste rate from static `max_context` preallocation).
+- [x] **The Solution:** Implemented `block_table.py` with physical block pooling and logical $\to$ physical address translation.
+- [x] **Copy-on-Write (Forking):** Verified child sequence shares physical blocks with parent and retains them safely.
+- [x] **Tensor Read/Write Exactness:** Verified paged storage reconstruction with bit-exact parity.
+- [x] **Measurement:** PagedAttention slashes cache footprint by **12.46x**, boosting concurrency on an 80 GB GPU from **298 to 3,699 concurrent users**.
+- [x] **Chart & Report:** Experiment script `experiments/m3_fragmentation.py` and chart `experiments/out/m3_fragmentation.png`.
 
 ---
 
-### [ ] Day 3: Serving & Schedulers (Milestone 4)
-- [ ] **Continuous Batching:** Iteration-level scheduling vs. static FCFS batching.
-- [ ] **Key Metrics:** TTFT (Time to First Token) vs. TPOT (Time per Output Token).
-- [ ] **Chunked Prefill:** Interleaving prefill chunks with decode steps to prevent latency spikes.
-- [ ] **Frontier Measurement:** Plotting the throughput vs. latency-SLO trade-off curve.
+### [x] Day 3: Serving & Schedulers (Milestone 4)
+- [x] **Continuous Batching:** Iteration-level scheduling vs. static FCFS batching (admitting new users the millisecond someone emits `<eos>`).
+- [x] **Key Metrics:** TTFT (Time to First Token, prefill-driven) vs. TPOT (Time per Output Token, decode-driven).
+- [x] **Chunked Prefill:** Slicing prompts into 512-token chunks and interleaving with decode steps to eliminate the "prefill hiccup".
+- [x] **The Boundary Ruler (`cu_seqlens`):** Managing ragged, variable-length batches in a flat 1D array while strictly preventing cross-user token bleed.
 
 ---
 
-### [ ] Day 4: Reading Fewer Bytes — Quantization (Milestone 5)
-- [ ] **The Core Realization:** Quantization is a *bandwidth* optimization (saving memory transfer time), not a compute one.
-- [ ] **Weight Quantization:** Round-To-Nearest (RTN) vs. GPTQ (Hessian-based compensation).
-- [ ] **KV Cache Quantization:** `fp16` $\to$ `int8` $\to$ `int4` and its effect on maximum concurrency.
-- [ ] **Cycle 2 Recall:** 10-minute verbal check-in on Schedulers, TTFT/TPOT, and Quantization.
+### [x] Day 4: Reading Fewer Bytes — Quantization (Milestone 5)
+- [x] **The Core Realization:** Quantization is a **bandwidth** optimization (saving bytes moved over memory bus), not a compute one!
+- [x] **Weight-Only (W4A16) vs. Weight+Activation (W8A8/FP8):** Why W4A16 speeds up decode ($3\text{–}4\times$) but not prefill, while W8A8 doubles both!
+- [x] **The Outlier Problem:** Why naive 4-bit breaks (0.1% of activation features explode to 100x magnitude).
+- [x] **Group-wise Scaling:** Slicing rows into groups (`group_size=128`) to isolate outliers.
+- [x] **PTQ Algorithms:** RTN (naive) vs. GPTQ (Hessian-based compensation) vs. AWQ (Activation-aware scaling protecting the salient 1% weights).
 
 ---
 
-### [ ] Day 5: Generating Fewer Tokens — Speculative Decoding (Milestone 6)
-- [ ] **The Core Trick:** Using a tiny 1B draft model to propose $K$ tokens, verified in one batched pass by the 8B target model.
-- [ ] **Why it works:** Decode is memory-bound; verifying $K$ tokens costs nearly the same bandwidth as verifying 1 token.
-- [ ] **Rejection Sampling:** Exact mathematical distribution matching.
-- [ ] **Speedup Model:** Acceptance rate vs. wall-clock speedup measurement.
+### [x] Day 5: Generating Fewer Tokens — Speculative Decoding (Milestone 6)
+- [x] **The Core Trick:** 1B draft model runs a fast decode loop ($K=4$ tokens); 8B target model runs **ONE single mini-prefill verification pass**.
+- [x] **Why It Works (Hardware Proof):** Reading 16 GB weights takes $4.8\text{ ms}$; processing 4 tokens in parallel takes the **exact same $4.8\text{ ms}$** as 1 token due to idle compute cores!
+- [x] **The Causal Mask as a Blindfold:** Ensures parallel verification gives identical mathematical results to 4 sequential steps.
+- [x] **Rejection Sampling:** Proves output distribution mathematically matches the target model 100%.
+- [x] **Production Model Families:** Alibaba (Qwen-72B + Qwen-0.5B), DeepSeek (MTP multi-token prediction heads), Meta (Llama-3.1-70B + Llama-3.2-1B), and Zhipu AI (GLM-4-9B + EAGLE).
 
 ---
 
-### [ ] Day 6: Scaling Up — Parallelism & Profiling
-- [ ] **Tensor Parallelism (TP):** Megatron-LM column and row parallel linear layers across GPUs.
-- [ ] **Pipeline Parallelism (PP):** Layer partitioning across GPUs and the 1F1B schedule.
-- [ ] **Profiling (M7):** Running `torch.profiler` to identify kernel launch overheads and real hardware roofline gaps.
+### [x] Day 6: Scaling Up — Parallelism & Profiling
+- [x] **Tensor Parallelism (TP):** Megatron-LM column and row parallel linear layers across GPUs. Only 2 All-Reduces per layer.
+- [x] **Intra-node vs. Inter-node:** Why TP requires NVLink (900 GB/s direct bridge, bypassing PCIe/CPU traffic jam).
+- [x] **Pipeline Parallelism (PP):** Layer partitioning across multiple server boxes (over network cables) and the pipeline bubble problem.
+- [x] **Profiling (M7):** Running `torch.profiler` to identify GPU starvation (kernel launch overheads) and kernel fusion opportunities.
 
 ---
 
-### [ ] Day 7: Modern Frontiers (MoE & DeepSeek MLA)
-- [ ] **Mixture of Experts (MoE):** Top-2 routing, active vs. total parameters (e.g. Mixtral 8x7B).
-- [ ] **Multi-Head Latent Attention (MLA):** DeepSeek KV cache low-rank compression.
-- [ ] **Cycle 3 Recall:** Explaining the two attack directions: doing less work vs. reading fewer bytes.
+### [x] Day 7: Modern Frontiers (MoE & DeepSeek MLA)
+- [x] **Mixture of Experts (MoE):** Top-2 routing, active vs. total parameters (Mixtral 8x7B: 47B total $\to$ 13B active; DeepSeek-V3: 671B total $\to$ 37B active).
+- [x] **The Router & Gate:** Single linear projection layer `W_gate`, trained end-to-end via backpropagation.
+- [x] **Load Balancing:** Why auxiliary loss or bias offsets are required to prevent winner-takes-all expert starvation.
+- [x] **Multi-Head Latent Attention (MLA):** Compressing Key/Value cache into a tiny 512-dim latent vector (vacuum bag analogy), cutting KV cache size by $93\%$ without decompressing in memory.
 
 ---
 
@@ -97,3 +102,5 @@ Overall Progress: [██░░░░░░░░] 1 / 8 Days (25% of Roadmap Mi
 | **GQA Cache Shrinkage** | $4\times$ reduction | 8 KV heads instead of 32 Query heads |
 | **Attention FLOPs Crossover** | $\approx 27\text{K}$ tokens | Attention FLOPs only surpass weight FLOPs far past the 8K context window |
 | **Measured M2 Speedup (CPU)** | $1.30\times \to 2.91\times$ | Measured across 16 to 256 tokens in `m2_speedup.png` |
+| **PagedAttention Waste Rate** | $92.3\% \to 4.5\%$ | Drops reservation waste by using 16-token blocks |
+| **Paged Concurrency Gain (80GB)** | $298 \to 3,699$ users ($12.4\times$) | Measured in `m3_fragmentation.png` |

@@ -1,6 +1,6 @@
 # Study Plan — Inference Engineering for Interviews
 
-**Status: Day 1 Complete (Milestones 1 & 2 + FlashAttention). Day 2 (Milestone 3: PagedAttention) Next.**  
+**Status: Day 2 Complete (Milestone 3: PagedAttention Done). Day 3 (Milestone 4: Continuous Batching) Next.**  
 👉 **Daily Progress & Checklist Tracker:** See [docs/tracker.md](tracker.md)
 
 ---
